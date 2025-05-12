@@ -1,0 +1,391 @@
+Here's the complete fixed code for your Polygon Arbitrage Bot with proper wallet connection and balance display functionality:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Polygon Arbitrage Bot</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers/dist/ethers.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@walletconnect/web3-provider/dist/umd/index.min.js"></script>
+  <style>
+    body { background-color: #013220; color: white; font-family: Arial; padding: 20px; }
+    input, select, button { margin: 5px; padding: 8px; font-size: 16px; }
+    button { cursor: pointer; }
+    table { width: 100%; margin-top: 20px; border-collapse: collapse; }
+    th, td { padding: 8px; border: 1px solid white; text-align: center; }
+    th { background-color: #025030; }
+    tr.profitable { background-color: #014d00; }
+    .card { background-color: #024530; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+    .error { color: #ff6b6b; }
+    .success { color: #4ade80; }
+    #walletAddress { word-break: break-all; }
+  </style>
+</head>
+<body>
+
+  <h2>Polygon Arbitrage Interface</h2>
+
+  <!-- Wallet Connect Section -->
+  <div class="card">
+    <button onclick="connectMetaMask()">Connect MetaMask</button>
+    <button onclick="connectWalletConnect()">Connect WalletConnect</button>
+    <button onclick="connectDeepLink()">Connect via Deep Link</button>
+    <p><strong>Wallet:</strong> <span id="walletAddress">Not connected</span></p>
+    <p><strong>USDC Balance:</strong> <span id="usdcBalance">0</span></p>
+    <p><strong>Token Balance:</strong> <span id="tokenBalance">N/A</span></p>
+    <p><strong>MATIC Balance:</strong> <span id="maticBalance">0</span></p>
+    <p id="connectionStatus"></p>
+  </div>
+
+  <!-- Trading Controls -->
+  <label>Trade Amount (USDC):</label>
+  <input id="tradeAmount" type="number" value="10" step="0.01" />
+
+  <label>Slippage (%):</label>
+  <input id="slippage" type="number" value="0.01" step="0.01" />
+
+  <label>Token:</label>
+  <select id="tokenSelect" onchange="updateTokenBalance()">
+    <option value="weth">WETH</option>
+    <option value="dai">DAI</option>
+    <option value="usdt">USDT</option>
+    <option value="custom">Custom</option>
+  </select>
+  <input id="customToken" placeholder="0x... custom token" style="width:300px;" oninput="updateTokenBalance()" />
+
+  <label><input type="checkbox" id="onlyProfit" checked /> Only Trade if Profitable</label><br><br>
+
+  <!-- Start/Stop Arbitrage -->
+  <button onclick="startTrading()">Start Trading</button>
+  <button onclick="stopTrading()">Stop Trading</button>
+  <p id="status">Status: Idle</p>
+
+  <!-- Results Table -->
+  <table>
+    <thead>
+      <tr>
+        <th>Buy From</th>
+        <th>Sell To</th>
+        <th>Token In</th>
+        <th>USDC Out</th>
+        <th>Profit</th>
+        <th>Tx Hash</th>
+      </tr>
+    </thead>
+    <tbody id="resultsTable"></tbody>
+  </table>
+
+<script>
+let provider, signer, userAddress;
+let trading = false, tradeInterval;
+let walletConnectProvider;
+
+const tokens = {
+  weth: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+  dai: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+  usdt: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+  usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+};
+
+const routers = {
+  quickswap: "0xa5E0829CaCED8fFDD4De3c43696c57F7D7A678ff",
+  sushiswap: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506"
+};
+
+const erc20ABI = [
+  "function approve(address spender, uint amount) public returns (bool)",
+  "function balanceOf(address owner) view returns (uint)",
+  "function decimals() view returns (uint8)"
+];
+
+const routerABI = [
+  "function getAmountsOut(uint amountIn, address[] memory path) view returns (uint[] memory)",
+  "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory)"
+];
+
+async function connectMetaMask() {
+  try {
+    if (!window.ethereum) {
+      throw new Error("MetaMask not detected. Please install MetaMask.");
+    }
+    
+    // Request account access
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    userAddress = accounts[0];
+    
+    // Create provider and signer
+    provider = new ethers.providers.Web3Provider(window.ethereum);
+    signer = provider.getSigner();
+    
+    // Update UI
+    document.getElementById("walletAddress").textContent = userAddress;
+    document.getElementById("connectionStatus").textContent = "Connected with MetaMask";
+    document.getElementById("connectionStatus").className = "success";
+    
+    // Set up event listeners
+    window.ethereum.on('accountsChanged', (accounts) => {
+      if (accounts.length === 0) {
+        // MetaMask is locked or user disconnected all accounts
+        handleDisconnect();
+      } else {
+        userAddress = accounts[0];
+        document.getElementById("walletAddress").textContent = userAddress;
+        updateBalances();
+      }
+    });
+    
+    window.ethereum.on('chainChanged', () => {
+      window.location.reload();
+    });
+    
+    window.ethereum.on('disconnect', handleDisconnect);
+    
+    // Update balances
+    await updateBalances();
+    
+  } catch (error) {
+    console.error("MetaMask connection error:", error);
+    document.getElementById("connectionStatus").textContent = error.message;
+    document.getElementById("connectionStatus").className = "error";
+  }
+}
+
+async function connectWalletConnect() {
+  try {
+    walletConnectProvider = new WalletConnectProvider.default({
+      rpc: { 
+        137: "https://polygon-rpc.com",
+        1: "https://mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161"
+      },
+      chainId: 137
+    });
+    
+    // Enable session (triggers QR Code modal)
+    await walletConnectProvider.enable();
+    
+    // Create provider and signer
+    provider = new ethers.providers.Web3Provider(walletConnectProvider);
+    signer = provider.getSigner();
+    userAddress = await signer.getAddress();
+    
+    // Update UI
+    document.getElementById("walletAddress").textContent = userAddress;
+    document.getElementById("connectionStatus").textContent = "Connected with WalletConnect";
+    document.getElementById("connectionStatus").className = "success";
+    
+    // Set up event listeners
+    walletConnectProvider.on("accountsChanged", (accounts) => {
+      if (accounts.length === 0) {
+        handleDisconnect();
+      } else {
+        userAddress = accounts[0];
+        document.getElementById("walletAddress").textContent = userAddress;
+        updateBalances();
+      }
+    });
+    
+    walletConnectProvider.on("chainChanged", () => {
+      window.location.reload();
+    });
+    
+    walletConnectProvider.on("disconnect", handleDisconnect);
+    
+    // Update balances
+    await updateBalances();
+    
+  } catch (error) {
+    console.error("WalletConnect error:", error);
+    document.getElementById("connectionStatus").textContent = error.message || "WalletConnect connection failed";
+    document.getElementById("connectionStatus").className = "error";
+  }
+}
+
+function connectDeepLink() {
+  const dappUrl = window.location.href;
+  const encodedUrl = encodeURIComponent(dappUrl);
+  const deepLink = `https://metamask.app.link/dapp/${encodedUrl}`;
+  window.open(deepLink, "_blank");
+}
+
+function handleDisconnect() {
+  userAddress = null;
+  provider = null;
+  signer = null;
+  
+  if (walletConnectProvider) {
+    walletConnectProvider.disconnect();
+    walletConnectProvider = null;
+  }
+  
+  document.getElementById("walletAddress").textContent = "Not connected";
+  document.getElementById("usdcBalance").textContent = "0";
+  document.getElementById("tokenBalance").textContent = "N/A";
+  document.getElementById("maticBalance").textContent = "0";
+  document.getElementById("connectionStatus").textContent = "Disconnected";
+  document.getElementById("connectionStatus").className = "error";
+  
+  if (trading) {
+    stopTrading();
+  }
+}
+
+async function updateBalances() {
+  await updateUSDCBalance();
+  await updateTokenBalance();
+  await updateMATICBalance();
+}
+
+async function updateUSDCBalance() {
+  if (!userAddress) return;
+  
+  try {
+    const usdc = new ethers.Contract(tokens.usdc, erc20ABI, provider);
+    const bal = await usdc.balanceOf(userAddress);
+    const decimals = await usdc.decimals();
+    document.getElementById("usdcBalance").textContent = ethers.utils.formatUnits(bal, decimals);
+  } catch (error) {
+    console.error("Error fetching USDC balance:", error);
+    document.getElementById("usdcBalance").textContent = "Error";
+  }
+}
+
+async function updateTokenBalance() {
+  if (!userAddress) return;
+  
+  const tokenKey = document.getElementById("tokenSelect").value;
+  const customAddr = document.getElementById("customToken").value.trim();
+  const tokenAddr = tokenKey === "custom" ? customAddr : tokens[tokenKey];
+  
+  if (!ethers.utils.isAddress(tokenAddr)) {
+    document.getElementById("tokenBalance").textContent = "N/A";
+    return;
+  }
+  
+  try {
+    const token = new ethers.Contract(tokenAddr, erc20ABI, provider);
+    const bal = await token.balanceOf(userAddress);
+    const decimals = await token.decimals();
+    document.getElementById("tokenBalance").textContent = ethers.utils.formatUnits(bal, decimals);
+  } catch (error) {
+    console.error("Error fetching token balance:", error);
+    document.getElementById("tokenBalance").textContent = "Error";
+  }
+}
+
+async function updateMATICBalance() {
+  if (!userAddress) return;
+  
+  try {
+    const balance = await provider.getBalance(userAddress);
+    document.getElementById("maticBalance").textContent = ethers.utils.formatEther(balance);
+  } catch (error) {
+    console.error("Error fetching MATIC balance:", error);
+    document.getElementById("maticBalance").textContent = "Error";
+  }
+}
+
+function startTrading() {
+  if (!signer) {
+    alert("Please connect wallet first.");
+    return;
+  }
+  
+  trading = true;
+  document.getElementById("status").textContent = "Status: Running";
+  tradeInterval = setInterval(performArbitrage, 10000);
+}
+
+function stopTrading() {
+  trading = false;
+  clearInterval(tradeInterval);
+  document.getElementById("status").textContent = "Status: Stopped";
+}
+
+async function performArbitrage() {
+  if (!signer) {
+    stopTrading();
+    return;
+  }
+
+  const tokenKey = document.getElementById("tokenSelect").value;
+  const customToken = document.getElementById("customToken").value.trim();
+  const token = tokenKey === "custom" ? customToken : tokens[tokenKey];
+  if (!ethers.utils.isAddress(token)) return;
+
+  const amountIn = ethers.utils.parseUnits(document.getElementById("tradeAmount").value, 6);
+  const slippagePct = parseFloat(document.getElementById("slippage").value) / 100;
+  const onlyProfit = document.getElementById("onlyProfit").checked;
+
+  let bestTrade = null;
+  let bestProfit = ethers.BigNumber.from(0);
+
+  for (let buy in routers) {
+    for (let sell in routers) {
+      if (buy === sell) continue;
+      try {
+        const buyRouter = new ethers.Contract(routers[buy], routerABI, provider);
+        const sellRouter = new ethers.Contract(routers[sell], routerABI, provider);
+        
+        const buyOut = await buyRouter.getAmountsOut(amountIn, [tokens.usdc, token]);
+        const tokenReceived = buyOut[1];
+        const sellOut = await sellRouter.getAmountsOut(tokenReceived, [token, tokens.usdc]);
+        const usdcOut = sellOut[1];
+        const profit = usdcOut.sub(amountIn);
+
+ if (!onlyProfit || profit.gt(0)) {
+          if (profit.gt(bestProfit)) {
+            bestProfit = profit;
+            bestTrade = { buy, sell, tokenReceived, usdcOut, profit, buyRouter, sellRouter };
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  if (bestTrade) {
+    document.getElementById("status").textContent = `Status: Profit ${ethers.utils.formatUnits(bestTrade.profit, 6)} USDC`;
+    const usdc = new ethers.Contract(tokens.usdc, erc20ABI, signer);
+    const tokenContract = new ethers.Contract(token, erc20ABI, signer);
+
+    await usdc.approve(routers[bestTrade.buy], amountIn);
+    const minOut1 = bestTrade.tokenReceived.mul(10000 - slippagePct * 10000).div(10000);
+    const tx1 = await bestTrade.buyRouter.connect(signer).swapExactTokensForTokens(
+      amountIn, minOut1, [tokens.usdc, token], userAddress, Math.floor(Date.now() / 1000 + 60)
+    );
+    await tx1.wait();
+
+    const balance = await tokenContract.balanceOf(userAddress);
+    await tokenContract.approve(routers[bestTrade.sell], balance);
+    const minOut2 = bestTrade.usdcOut.mul(10000 - slippagePct * 10000).div(10000);
+    const tx2 = await bestTrade.sellRouter.connect(signer).swapExactTokensForTokens(
+      balance, minOut2, [token, tokens.usdc], userAddress, Math.floor(Date.now() / 1000 + 60)
+    );
+    const receipt2 = await tx2.wait();
+
+    const row = document.createElement("tr");
+    row.classList.add("profitable");
+    row.innerHTML = `
+      <td>${bestTrade.buy}</td>
+      <td>${bestTrade.sell}</td>
+      <td>${ethers.utils.formatUnits(bestTrade.tokenReceived, 18).slice(0, 8)}</td>
+      <td>${ethers.utils.formatUnits(bestTrade.usdcOut, 6)}</td>
+      <td>${ethers.utils.formatUnits(bestTrade.profit, 6)}</td>
+      <td><a href="https://polygonscan.com/tx/${receipt2.transactionHash}" target="_blank">Tx</a></td>`;
+    document.getElementById("resultsTable").appendChild(row);
+
+    await updateUSDCBalance();
+    await updateTokenBalance();
+  } else {
+    document.getElementById("status").textContent = "Status: No profitable trade.";
+  }
+}
+
+window.onload = async () => {
+  if (window.ethereum && window.ethereum.selectedAddress) {
+    await connectMetaMask();
+  }
+};
+</script>
+</body>
+</html>
